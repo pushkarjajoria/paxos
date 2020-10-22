@@ -7,9 +7,10 @@ import struct
 """------------------------------"""
 from enum import Enum
 import json
-from datetime import datetime
+import datetime
 
-class MessageType(Enum):
+
+class MessageType:
     CLIENT_MSG = 1
     PHASE1A = 2
     PHASE2A = 3
@@ -18,7 +19,7 @@ class MessageType(Enum):
     PHASE3 = 6
 
 
-class DictIds(Enum):
+class DictIds:
     INSTANCE_ID = 'instance_ID'
     VALUE = 'value'
     C_RND = 'c_rnd'
@@ -29,7 +30,6 @@ class DictIds(Enum):
     MSG_TYPE = 'msg_type'
     STATUS = "status"
     TIME = "time"
-
 
 
 class MsgHandler():
@@ -113,7 +113,7 @@ class Learner:
         return json_dict
 
 
-class Acceptor():
+class Acceptor:
 
     def __init__(self, id, s):
         self.acceptor_id = id
@@ -181,9 +181,10 @@ class Proposer():
 
     def retry_waiting_instances(self):
         for instance_id in self.status.keys():
-            status, start_time = self.status[instance_id]
-            current_time = datetime.now()
-            if current_time - start_time > self.RETRY_THRESHOLD and status == self.ProposerStatus.W_PHASE1B:
+            cached_status = self.status[instance_id]
+            status, start_time = cached_status[DictIds.STATUS], cached_status[DictIds.TIME]
+            current_time = datetime.datetime.now()
+            if current_time - start_time > datetime.timedelta(seconds=self.RETRY_THRESHOLD) and status == self.ProposerStatus.W_PHASE1B:
                 self.execute_phase1a(instance_id)
 
     def execute_phase1a(self, instance_id):
@@ -195,7 +196,7 @@ class Proposer():
         self.sender.sendto(msg, msg_handler.config['acceptors'])
         self.status[instance_id] = {
             DictIds.STATUS: self.ProposerStatus.W_PHASE1B,
-            DictIds.TIME: datetime.now()
+            DictIds.TIME: datetime.datetime.now()
         }
 
     def execute_phase2a(self, c_rnd, c_val, instance_id):
@@ -206,7 +207,7 @@ class Proposer():
         instance_id = msg_dict[DictIds.INSTANCE_ID]
         self.status[self.instance_id] = {
             DictIds.STATUS: self.ProposerStatus.E_PHASE2A,
-            DictIds.TIME: datetime.now()
+            DictIds.TIME: datetime.datetime.now()
         }
         self.quorum_2a[instance_id] = self.quorum_2a[msg_dict.get(instance_id, 0)] + 1
         max_v_rnd, max_v_val = self.max_v_rnd_v_val.get(instance_id, (0, float('-inf')))
@@ -238,7 +239,7 @@ class Proposer():
         self.instance_id += 1
         self.status[self.instance_id] = {
             DictIds.STATUS: self.ProposerStatus.E_PHASE1A,
-            DictIds.TIME: datetime.now()
+            DictIds.TIME: datetime.datetime.now()
         }
         self.client_val[self.instance_id] = msg[DictIds.VALUE]
         self.execute_phase1a(self.instance_id)
@@ -298,9 +299,6 @@ def acceptor(config, id):
         else:
             # print("proposer: sending %s to acceptors" % (msg)
             raise Exception("Unknown Message message = [" + msg + "]")
-        if id == 1:
-            # print("acceptor: sending %s to learners" % (msg)
-            s.sendto(msg, config['learners'])
 
 
 def proposer(config, id):
@@ -318,7 +316,7 @@ def proposer(config, id):
         # TODO: Try catch
         msg_type = int(msg_dict['msg_type'])
         if msg_type == MessageType.CLIENT_MSG:
-            _proposer.handle_client_msg(msg)
+            _proposer.handle_client_msg(msg_dict)
         elif msg_type == MessageType.PHASE1B:
             _proposer.handle_phase1b(msg_dict)
         elif msg_type == MessageType.PHASE2B:
@@ -335,7 +333,7 @@ def learner(config, id):
     while True:
         msg = r.recv(2 ** 16).decode("utf_8")
         msg_dict = json.loads(msg)
-        msg_type = int(msg_dict['msg_type'])
+        msg_type = int(msg_dict[DictIds.MSG_TYPE])
         if msg_type == MessageType.PHASE3:
             _learner.handle_phase3(msg_dict)
         else:
@@ -351,22 +349,20 @@ def client(config, id):
         value = value.strip()
         print("client: sending %s to proposers" % value)
         json_msg = msg_handler.create_proposer_msg(value)
-        s.sendto(json_msg.encode('utf-8'), config['proposers'])
+        s.sendto(json_msg, config['proposers'])
     print('client done.')
 
 
 if __name__ == '__main__':
-    if len(sys.argv) <= 1:
-        cfgpath = "../paxos.conf"
-    else:
-        cfgpath = sys.argv[1]
+    cfgpath = sys.argv[1]
+    # cfgpath = "paxos.conf"
     config = parse_cfg(cfgpath)
     msg_handler = MsgHandler(config)
 
-    # role = sys.argv[2]
-    role = 'client'
-    id = 1
-    # id = int(sys.argv[3])
+    role = sys.argv[2]
+    # role = 'client'
+    # id = 1
+    id = int(sys.argv[3])
     if role == 'acceptor':
         rolefunc = acceptor
     elif role == 'proposer':
