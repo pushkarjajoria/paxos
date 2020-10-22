@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3.6
 import json
 import sys
 import socket
@@ -8,6 +8,8 @@ import struct
 from enum import Enum
 import json
 import datetime
+import time
+import random
 
 
 class MessageType:
@@ -32,7 +34,7 @@ class DictIds:
     TIME = "time"
 
 
-class MsgHandler():
+class MsgHandler:
 
     def __init__(self, config):
         self.config = config
@@ -101,7 +103,7 @@ class Learner:
 
     def handle_phase3(self, msg_dict):
         instance_id = msg_dict[DictIds.INSTANCE_ID]
-        if self.learned_values[instance_id]:
+        if instance_id in self.learned_values:
             pass
         else:
             print(msg_dict[DictIds.V_VAL])
@@ -132,30 +134,32 @@ class Acceptor:
             v_val = self.v_val.get(instance_id, float('-inf'))
             self.execute_phase1b(rnd, v_rnd, v_val, instance_id)
         else:
-            print("Ignoring Phase1A message")
+            pass
+            # print("Ignoring Phase1A message")
 
     def execute_phase1b(self, rnd, v_rnd, v_val, instance_id):
         phase1b_msg = msg_handler.create_phase1B_msg(rnd, v_rnd, v_val, instance_id)
-        self.sender(phase1b_msg)
+        self.sender.sendto(phase1b_msg, msg_handler.config['proposers'])
 
     def execute_phase2b(self, v_rnd, v_val, instance_id):
         phase2b_msg = msg_handler.create_phase2B_msg(v_rnd, v_val, instance_id)
-        self.sender(phase2b_msg)
+        self.sender.sendto(phase2b_msg, msg_handler.config['proposers'])
 
-    def handle_phase2a(self, msg):
-        instance_id = msg[DictIds.INSTANCE_ID]
-        c_rnd = msg[DictIds.C_RND]
-        c_val = msg[DictIds.C_VAL]
+    def handle_phase2a(self, msg_dict):
+        instance_id = msg_dict[DictIds.INSTANCE_ID]
+        c_rnd = msg_dict[DictIds.C_RND]
+        c_val = msg_dict[DictIds.C_VAL]
         rnd = self.rnd.get(instance_id, 0)
-        if msg[DictIds.C_RND] >= rnd:
+        if msg_dict[DictIds.C_RND] >= rnd:
             self.v_rnd[instance_id] = c_rnd
             self.v_val[instance_id] = c_val
             self.execute_phase2b(self.v_rnd[instance_id], self.v_val[instance_id], instance_id)
         else:
-            print("Ignoring Phase1A message")
+            pass
+            # print("Ignoring Phase1A message")
 
 
-class Proposer():
+class Proposer:
 
     class ProposerStatus(Enum):
         IDLE = 1
@@ -177,7 +181,10 @@ class Proposer():
         self.quorum_3 = {}
         self.required_quorum = 2
         self.max_v_rnd_v_val = {}
-        self.RETRY_THRESHOLD = 10 # seconds
+        self.RETRY_THRESHOLD = 2    # seconds
+
+    def oracle_am_i_leader(self):
+        return self.proposer_id == 1
 
     def retry_waiting_instances(self):
         for instance_id in self.status.keys():
@@ -190,6 +197,7 @@ class Proposer():
     def execute_phase1a(self, instance_id):
         if instance_id in self.c_rnd:
             self.c_rnd[instance_id] += self.num_of_proposers
+            # TODO: Leader Election
         else:
             self.c_rnd[instance_id] = self.proposer_id
         msg = msg_handler.create_phase1A_msg(self.c_rnd[instance_id], instance_id)
@@ -209,7 +217,7 @@ class Proposer():
             DictIds.STATUS: self.ProposerStatus.E_PHASE2A,
             DictIds.TIME: datetime.datetime.now()
         }
-        self.quorum_2a[instance_id] = self.quorum_2a[msg_dict.get(instance_id, 0)] + 1
+        self.quorum_2a[instance_id] = self.quorum_2a.get(msg_dict.get(instance_id, 0), 0) + 1
         max_v_rnd, max_v_val = self.max_v_rnd_v_val.get(instance_id, (0, float('-inf')))
         if max_v_rnd < msg_dict[DictIds.V_RND]:
             max_v_rnd, max_v_val = msg_dict[DictIds.V_RND], msg_dict[DictIds.V_VAL]
@@ -224,9 +232,9 @@ class Proposer():
 
     def handle_phase2b(self, msg_dict):
         instance_id = msg_dict[DictIds.INSTANCE_ID]
-        self.quorum_3[instance_id] = self.quorum_3[msg_dict.get(instance_id, 0)] + 1
+        self.quorum_3[instance_id] = self.quorum_3.get(msg_dict.get(instance_id, 0), 0) + 1
         if msg_dict[DictIds.V_RND] != self.c_rnd[instance_id]:
-            raise Exception("We don't know what to do in this case")
+            return
         if self.quorum_2a[msg_dict[DictIds.INSTANCE_ID]] >= self.required_quorum:
             v_val = msg_dict[DictIds.V_VAL]
             self.execute_phase3(v_val, instance_id)
@@ -295,7 +303,7 @@ def acceptor(config, id):
         if msg_type == MessageType.PHASE1A:
             _acceptor.handle_phase1a(msg_dict)
         elif msg_type == MessageType.PHASE2A:
-            _acceptor.handle_phase2a()
+            _acceptor.handle_phase2a(msg_dict)
         else:
             # print("proposer: sending %s to acceptors" % (msg)
             raise Exception("Unknown Message message = [" + msg + "]")
@@ -343,8 +351,8 @@ def learner(config, id):
 def client(config, id):
     print('-> client ', id)
     s = mcast_sender()
-    # values = sys.stdin
-    values = ["1", "2", "4"]
+    values = sys.stdin
+    # values = ["1", "2", "4"]
     for value in values:
         value = value.strip()
         print("client: sending %s to proposers" % value)
@@ -360,7 +368,7 @@ if __name__ == '__main__':
     msg_handler = MsgHandler(config)
 
     role = sys.argv[2]
-    # role = 'client'
+    # role = 'acceptor'
     # id = 1
     id = int(sys.argv[3])
     if role == 'acceptor':
