@@ -10,6 +10,7 @@ import json
 import datetime
 import time
 import random
+from threading import Thread
 
 
 class MessageType:
@@ -149,6 +150,8 @@ class Acceptor:
         instance_id = msg_dict[DictIds.INSTANCE_ID]
         c_rnd = msg_dict[DictIds.C_RND]
         c_val = msg_dict[DictIds.C_VAL]
+        if c_rnd > 1:
+            print("C-RND is greater than 1 with msg dict" + str(msg_dict))
         rnd = self.rnd.get(instance_id, 0)
         if msg_dict[DictIds.C_RND] >= rnd:
             self.v_rnd[instance_id] = c_rnd
@@ -159,16 +162,17 @@ class Acceptor:
             # print("Ignoring Phase1A message")
 
 
-class Proposer:
-
+class Proposer(Thread):
     class ProposerStatus(Enum):
         IDLE = 1
         E_PHASE1A = 2
         W_PHASE1B = 3
         E_PHASE2A = 4
         W_PHASE2B = 5
+        HALTED = 6
 
     def __init__(self, id, s):
+        Thread.__init__(self)
         self.num_of_proposers = 2
         self.status = {}
         self.instance_id = -1
@@ -179,9 +183,16 @@ class Proposer:
         self.sender = s
         self.quorum_2a = {}
         self.quorum_3 = {}
-        self.required_quorum = 2
+        self.required_quorum = 1
         self.max_v_rnd_v_val = {}
-        self.RETRY_THRESHOLD = 2    # seconds
+        self.RETRY_THRESHOLD = 20  # seconds
+        self.buffer = []
+        self.msg_counter = 0
+        self.twoa_counter = 0
+        self.phase3_counter = 0
+        self.phase1_counter = 0
+        self.quorun_not_done_2A = {}
+        self.quorun_not_done_3 = {}
 
     def oracle_am_i_leader(self):
         return self.proposer_id == 1
@@ -191,16 +202,27 @@ class Proposer:
             cached_status = self.status[instance_id]
             status, start_time = cached_status[DictIds.STATUS], cached_status[DictIds.TIME]
             current_time = datetime.datetime.now()
-            if current_time - start_time > datetime.timedelta(seconds=self.RETRY_THRESHOLD) and status == self.ProposerStatus.W_PHASE1B:
+            if current_time - start_time > datetime.timedelta(
+                    seconds=self.RETRY_THRESHOLD) and status == self.ProposerStatus.W_PHASE1B:
+                self.status[instance_id] = {
+                    DictIds.STATUS: self.ProposerStatus.W_PHASE1B,
+                    DictIds.TIME: datetime.datetime.now()
+                }
                 self.execute_phase1a(instance_id)
 
     def execute_phase1a(self, instance_id):
         if instance_id in self.c_rnd:
             self.c_rnd[instance_id] += self.num_of_proposers
-            # TODO: Leader Election
+            if self.c_rnd[instance_id] >= 10 and not self.oracle_am_i_leader():
+                self.status[instance_id] = {
+                    DictIds.STATUS: self.ProposerStatus.HALTED,
+                    DictIds.TIME: datetime.datetime.now()
+                }
         else:
             self.c_rnd[instance_id] = self.proposer_id
         msg = msg_handler.create_phase1A_msg(self.c_rnd[instance_id], instance_id)
+        self.phase1_counter += 1
+        print("1A_counter -> ", self.phase1_counter)
         self.sender.sendto(msg, msg_handler.config['acceptors'])
         self.status[instance_id] = {
             DictIds.STATUS: self.ProposerStatus.W_PHASE1B,
@@ -208,6 +230,8 @@ class Proposer:
         }
 
     def execute_phase2a(self, c_rnd, c_val, instance_id):
+        self.twoa_counter += 1
+        print("2A_counter -> ", self.twoa_counter)
         msg = msg_handler.create_phase2A_msg(c_rnd, c_val, instance_id)
         self.sender.sendto(msg, msg_handler.config['acceptors'])
 
@@ -217,12 +241,13 @@ class Proposer:
             DictIds.STATUS: self.ProposerStatus.E_PHASE2A,
             DictIds.TIME: datetime.datetime.now()
         }
-        self.quorum_2a[instance_id] = self.quorum_2a.get(msg_dict.get(instance_id, 0), 0) + 1
+        self.quorum_2a[instance_id] = self.quorum_2a.get(instance_id, 0) + 1
         max_v_rnd, max_v_val = self.max_v_rnd_v_val.get(instance_id, (0, float('-inf')))
         if max_v_rnd < msg_dict[DictIds.V_RND]:
             max_v_rnd, max_v_val = msg_dict[DictIds.V_RND], msg_dict[DictIds.V_VAL]
             self.max_v_rnd_v_val[instance_id] = (max_v_rnd, max_v_val)
-        if self.quorum_2a[msg_dict[DictIds.INSTANCE_ID]] >= self.required_quorum:
+        if self.quorum_2a[instance_id] >= self.required_quorum and self.quorun_not_done_2A.get(instance_id, True):
+            self.quorun_not_done_2A[instance_id] = False
             if max_v_rnd == 0:
                 self.c_val[instance_id] = self.client_val[instance_id]
             else:
@@ -232,14 +257,17 @@ class Proposer:
 
     def handle_phase2b(self, msg_dict):
         instance_id = msg_dict[DictIds.INSTANCE_ID]
-        self.quorum_3[instance_id] = self.quorum_3.get(msg_dict.get(instance_id, 0), 0) + 1
+        self.quorum_3[instance_id] = self.quorum_3.get(instance_id, 0) + 1
         if msg_dict[DictIds.V_RND] != self.c_rnd[instance_id]:
             return
-        if self.quorum_2a[msg_dict[DictIds.INSTANCE_ID]] >= self.required_quorum:
+        if self.quorum_2a[msg_dict[DictIds.INSTANCE_ID]] >= self.required_quorum and self.quorun_not_done_3.get(instance_id, True):
+            self.quorun_not_done_3[instance_id] = False
             v_val = msg_dict[DictIds.V_VAL]
             self.execute_phase3(v_val, instance_id)
 
     def execute_phase3(self, v_val, instance_id):
+        self.phase3_counter += 1
+        print("3A_counter -> ", self.phase3_counter)
         msg = msg_handler.create_phase3_msg(v_val, instance_id)
         self.sender.sendto(msg, msg_handler.config['learners'])
 
@@ -253,8 +281,19 @@ class Proposer:
         self.execute_phase1a(self.instance_id)
         pass
 
-"""----------------------------------"""
+    def run(self):
+        r = mcast_receiver(config['proposers'])
+        while True:
+            msg = r.recv(2 ** 16).decode("utf_8")
+            msg_dict = json.loads(msg)
+            msg_type = int(msg_dict['msg_type'])
+            if msg_type == MessageType.CLIENT_MSG:
+                self.msg_counter += 1
+            self.buffer.append(msg)
+        # Read values and add them to the buffer
 
+
+"""----------------------------------"""
 
 global msg_handler
 
@@ -312,10 +351,15 @@ def acceptor(config, id):
 def proposer(config, id):
     s = mcast_sender()
     _proposer = Proposer(id, s)
+    _proposer.start()
+    # leader = _proposer.oracle_am_i_leader()
     print('-> proposer', id)
-    r = mcast_receiver(config['proposers'])
+    time.sleep(2)
     while True:
-        msg = r.recv(2 ** 16).decode("utf_8")
+        try:
+            msg = _proposer.buffer.pop()
+        except IndexError as e:
+            continue
         # Check msg type
         # Can either be Client Msg, P1B or P2B
         # Execute P1A, P2A, P3
@@ -324,6 +368,7 @@ def proposer(config, id):
         # TODO: Try catch
         msg_type = int(msg_dict['msg_type'])
         if msg_type == MessageType.CLIENT_MSG:
+            print(f"Total Messages processed till now = {_proposer.msg_counter}")
             _proposer.handle_client_msg(msg_dict)
         elif msg_type == MessageType.PHASE1B:
             _proposer.handle_phase1b(msg_dict)
@@ -332,7 +377,7 @@ def proposer(config, id):
         else:
             # print("proposer: sending %s to acceptors" % (msg)
             raise Exception("Unknown Message message = [" + msg + "]")
-        _proposer.retry_waiting_instances()
+        # _proposer.retry_waiting_instances()
 
 
 def learner(config, id):
@@ -353,11 +398,14 @@ def client(config, id):
     s = mcast_sender()
     values = sys.stdin
     # values = ["1", "2", "4"]
-    for value in values:
+    for i, value in enumerate(values):
         value = value.strip()
         print("client: sending %s to proposers" % value)
         json_msg = msg_handler.create_proposer_msg(value)
         s.sendto(json_msg, config['proposers'])
+        if i % 2000 == 0 and i > 0:
+            time.sleep(0.5)
+
     print('client done.')
 
 
