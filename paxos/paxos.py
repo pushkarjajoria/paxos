@@ -9,7 +9,7 @@ import json
 import datetime
 import time
 from threading import Thread
-catch_up = 0
+import random
 
 class MessageType:
     CLIENT_MSG = 1
@@ -245,7 +245,8 @@ class Acceptor(Thread):
         r = mcast_receiver(config['acceptors'])
         while True:
             msg = r.recv(2 ** 16).decode("utf_8")
-            self.buffer.append(msg)
+            if random.uniform(0,1) >= MSG_LOSS:
+                self.buffer.append(msg)
 
 
 class Proposer(Thread):
@@ -400,7 +401,8 @@ class Proposer(Thread):
         r = mcast_receiver(config['proposers'])
         while True:
             msg = r.recv(2 ** 16).decode("utf_8")
-            self.buffer.append(msg)
+            if random.uniform(0,1) >= MSG_LOSS:
+                self.buffer.append(msg)
 
     def finish_instance_id(self, instance_id):
         self.status[instance_id] = {
@@ -416,6 +418,7 @@ class Proposer(Thread):
 """----------------------------------"""
 
 global msg_handler
+catch_up = 0
 
 
 def mcast_receiver(hostport):
@@ -553,6 +556,7 @@ def client(config, id):
 
     print(f"client{id} done.")
 
+MSG_LOSS = 0
 
 if __name__ == '__main__':
     cfgpath = sys.argv[1]
