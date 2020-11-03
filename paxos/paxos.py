@@ -9,7 +9,7 @@ import json
 import datetime
 import time
 from threading import Thread
-
+catch_up = 0
 
 class MessageType:
     CLIENT_MSG = 1
@@ -18,6 +18,9 @@ class MessageType:
     PHASE1B = 4
     PHASE2B = 5
     PHASE3 = 6
+    INSTANCE_DONE = 7
+    CATCH_UP = 8
+
 
 
 class DictIds:
@@ -32,6 +35,8 @@ class DictIds:
     STATUS = "status"
     TIME = "time"
     PROPOSER_ID = "proposer_id"
+    CATCHUP_VALUES = "catchup_values"
+    LEARNER_ID = "learner_id"
 
 
 class MsgHandler:
@@ -100,12 +105,41 @@ class MsgHandler:
         json_dump = json.dumps(json_dict).encode("utf_8")
         return json_dump
 
+    def create_instance_done_msg(self, instance_id):
+        json_dict = {
+            DictIds.MSG_TYPE: MessageType.INSTANCE_DONE,
+            DictIds.INSTANCE_ID: instance_id
+        }
+        json_dump = json.dumps(json_dict).encode("utf_8")
+        return json_dump
+
+    def create_catch_up_msg(self, learner_id):
+        json_dict = {
+            DictIds.MSG_TYPE: MessageType.CATCH_UP,
+            DictIds.LEARNER_ID: learner_id
+        }
+        json_dump = json.dumps(json_dict).encode("utf_8")
+        return json_dump
+
+    def create_catch_up_msg_proposer(self, learned_val, learner_id):
+        json_dict = {
+            DictIds.MSG_TYPE: MessageType.CATCH_UP,
+            DictIds.CATCHUP_VALUES: learned_val,
+            DictIds.LEARNER_ID: learner_id
+        }
+        json_dump = json.dumps(json_dict).encode("utf_8")
+        return json_dump
+
+
 
 class Learner(Thread):
-    def __init__(self):
+    def __init__(self, id, sender):
         Thread.__init__(self)
         self.learned_values = {}
+        self.learned_values_catchup = []
         self.buffer = []
+        self.sender = sender
+        self.id = id
 
     def handle_phase3(self, msg_dict):
         instance_id = msg_dict[DictIds.INSTANCE_ID]
@@ -116,12 +150,36 @@ class Learner(Thread):
             sys.stdout.flush()
             self.learned_values[instance_id] = msg_dict[DictIds.V_VAL]
 
-    def run(self):
+    def wait_for_catchup_value(self):
         # Read values and add them to the buffer
         r = mcast_receiver(config['learners'])
         while True:
             msg = r.recv(2 ** 16).decode("utf_8")
+            msg_dict = json.loads(msg)
+            msg_type = msg_dict.get(DictIds.MSG_TYPE)
+            if msg_type == MessageType.CATCH_UP:
+                if msg_dict.get(DictIds.LEARNER_ID) == self.id:
+                    self.handle_catch_up(msg_dict)
+                    return
+                else:
+                    continue
             self.buffer.append(msg)
+
+    def run(self):
+        r = mcast_receiver(config['learners'])
+        while True:
+            msg = r.recv(2 ** 16).decode("utf_8")
+            self.buffer.append(msg)
+
+    def send_catch_up_msg(self):
+        catch_up_msg = msg_handler.create_catch_up_msg(self.id)
+        self.sender.sendto(catch_up_msg, msg_handler.config['proposers'])
+
+    def handle_catch_up(self, msg_dict):
+        values = msg_dict.get(DictIds.CATCHUP_VALUES)
+        self.learned_values_catchup = values
+        while len(values) > 0:
+            print(values.pop())
 
 
 class Acceptor(Thread):
@@ -134,20 +192,31 @@ class Acceptor(Thread):
         self.v_val = {}
         self.rnd = {}
         self.buffer = []
+        self.instance_done = {}
+
+    def is_instance_done(self, instance_id):
+        return self.instance_done.get(instance_id, False)
+
+    def execute_instance_id_done(self, instance_id):
+        phase1b_msg = msg_handler.create_instance_done_msg(instance_id=instance_id)
+        self.sender.sendto(phase1b_msg, msg_handler.config['proposers'])
 
     def handle_phase1a(self, msg):
         instance_id = msg[DictIds.INSTANCE_ID]
-        rnd = self.rnd.get(instance_id, 0)
-        proposer_id = msg[DictIds.PROPOSER_ID]
-        if msg[DictIds.C_RND] > rnd:
-            self.rnd[instance_id] = msg[DictIds.C_RND]
-            rnd = self.rnd[instance_id]
-            v_rnd = self.v_rnd.get(instance_id, 0)
-            v_val = self.v_val.get(instance_id, float('-inf'))
-            self.execute_phase1b(rnd, v_rnd, v_val, instance_id, proposer_id)
+        if not self.is_instance_done(instance_id):
+            rnd = self.rnd.get(instance_id, 0)
+            proposer_id = msg[DictIds.PROPOSER_ID]
+            if msg[DictIds.C_RND] > rnd:
+                self.rnd[instance_id] = msg[DictIds.C_RND]
+                rnd = self.rnd[instance_id]
+                v_rnd = self.v_rnd.get(instance_id, 0)
+                v_val = self.v_val.get(instance_id, float('-inf'))
+                self.execute_phase1b(rnd, v_rnd, v_val, instance_id, proposer_id)
+            else:
+                pass
+                # print("Ignoring Phase1A message")
         else:
-            pass
-            # print("Ignoring Phase1A message")
+            self.execute_instance_id_done(instance_id)
 
     def execute_phase1b(self, rnd, v_rnd, v_val, instance_id, proposer_id):
         phase1b_msg = msg_handler.create_phase1B_msg(rnd, v_rnd, v_val, instance_id, proposer_id)
@@ -159,17 +228,23 @@ class Acceptor(Thread):
 
     def handle_phase2a(self, msg_dict):
         instance_id = msg_dict[DictIds.INSTANCE_ID]
-        c_rnd = msg_dict[DictIds.C_RND]
-        c_val = msg_dict[DictIds.C_VAL]
-        proposer_id = msg_dict[DictIds.PROPOSER_ID]
-        rnd = self.rnd.get(instance_id, 0)
-        if msg_dict[DictIds.C_RND] >= rnd:
-            self.v_rnd[instance_id] = c_rnd
-            self.v_val[instance_id] = c_val
-            self.execute_phase2b(self.v_rnd[instance_id], self.v_val[instance_id], instance_id, proposer_id)
+        if not self.is_instance_done(instance_id):
+            c_rnd = msg_dict[DictIds.C_RND]
+            c_val = msg_dict[DictIds.C_VAL]
+            proposer_id = msg_dict[DictIds.PROPOSER_ID]
+            rnd = self.rnd.get(instance_id, 0)
+            if msg_dict[DictIds.C_RND] >= rnd:
+                self.v_rnd[instance_id] = c_rnd
+                self.v_val[instance_id] = c_val
+                self.execute_phase2b(self.v_rnd[instance_id], self.v_val[instance_id], instance_id, proposer_id)
+            else:
+                pass
+                # print("Ignoring Phase1A message")
         else:
-            pass
-            # print("Ignoring Phase1A message")
+            self.execute_instance_id_done(instance_id)
+
+    def finish_instance_id(self, instance_id):
+        self.instance_done[instance_id] = True
 
     def run(self):
         # Read values and add them to the buffer
@@ -191,9 +266,10 @@ class Proposer(Thread):
 
     def __init__(self, id, s):
         Thread.__init__(self)
+        self.learned_val = []
         self.num_of_proposers = 2
         self.status = {}
-        self.instance_id = -1
+        self.instance_id = -1   # Starting with -1 because we increment the instance_id each time we get client_msg
         self.proposer_id = id
         self.client_val = {}
         self.c_val = {}
@@ -203,7 +279,7 @@ class Proposer(Thread):
         self.quorum_3 = {}
         self.required_quorum = 2
         self.max_v_rnd_v_val = {}
-        self.RETRY_THRESHOLD = 5  # seconds
+        self.RETRY_THRESHOLD = 20  # seconds
         self.buffer = []
         self.msg_counter = 0
         self.twoa_counter = 0
@@ -223,11 +299,15 @@ class Proposer(Thread):
             current_time = datetime.datetime.now()
             if current_time - start_time > datetime.timedelta(seconds=self.RETRY_THRESHOLD) and \
                     (status == self.ProposerStatus.W_PHASE1B or status == self.ProposerStatus.W_PHASE2B):
-                print(f"Retrying -> {instance_id}")
+                print(f"Retrying -> {instance_id} -- Status -> {status} -- TimeDelta -> {current_time - start_time} -- ProposerID -> {self.proposer_id}")
                 self.status[instance_id] = {
                     DictIds.STATUS: self.ProposerStatus.W_PHASE1B,
                     DictIds.TIME: datetime.datetime.now()
                 }
+                self.quorum_2a[instance_id] = 0
+                self.quorum_3[instance_id] = 0
+                self.quorun_not_done_2A[instance_id] = True
+                self.quorun_not_done_3[instance_id] = True
                 self.execute_phase1a(instance_id, proposer_id)
 
     def execute_phase1a(self, instance_id, proposer_id):
@@ -246,11 +326,11 @@ class Proposer(Thread):
         if self.phase1_counter % 100 == 0:
             print("1A_counter -> ", self.phase1_counter)
             time.sleep(0.1)
-        self.sender.sendto(msg, msg_handler.config['acceptors'])
         self.status[instance_id] = {
             DictIds.STATUS: self.ProposerStatus.W_PHASE1B,
             DictIds.TIME: datetime.datetime.now()
         }
+        self.sender.sendto(msg, msg_handler.config['acceptors'])
 
     def execute_phase2a(self, c_rnd, c_val, instance_id):
         self.twoa_counter += 1
@@ -258,7 +338,7 @@ class Proposer(Thread):
             print("2A_counter -> ", self.twoa_counter)
             time.sleep(0.1)
         msg = msg_handler.create_phase2A_msg(c_rnd, c_val, instance_id, self.proposer_id)
-        self.status[self.instance_id] = {
+        self.status[instance_id] = { #
             DictIds.STATUS: self.ProposerStatus.W_PHASE2B,
             DictIds.TIME: datetime.datetime.now()
         }
@@ -273,7 +353,7 @@ class Proposer(Thread):
             self.max_v_rnd_v_val[instance_id] = (max_v_rnd, max_v_val)
         if self.quorum_2a[instance_id] >= self.required_quorum and self.quorun_not_done_2A.get(instance_id, True):
             self.quorun_not_done_2A[instance_id] = False
-            self.status[self.instance_id] = {
+            self.status[instance_id] = { #
                 DictIds.STATUS: self.ProposerStatus.E_PHASE2A,
                 DictIds.TIME: datetime.datetime.now()
             }
@@ -290,7 +370,7 @@ class Proposer(Thread):
         if msg_dict[DictIds.V_RND] != self.c_rnd[instance_id]:
             return
         if self.quorum_2a[msg_dict[DictIds.INSTANCE_ID]] >= self.required_quorum and self.quorun_not_done_3.get(instance_id, True):
-            self.status[self.instance_id] = {
+            self.status[instance_id] = { #
                 DictIds.STATUS: self.ProposerStatus.FINISHED,
                 DictIds.TIME: datetime.datetime.now()
             }
@@ -298,13 +378,19 @@ class Proposer(Thread):
             v_val = msg_dict[DictIds.V_VAL]
             self.execute_phase3(v_val, instance_id)
 
+    def execute_instance_status(self, instance_id):
+        msg = msg_handler.create_instance_done_msg(instance_id)
+        self.sender.sendto(msg, msg_handler.config['acceptors'])
+
     def execute_phase3(self, v_val, instance_id):
+        self.learned_val.append(v_val)
         self.phase3_counter += 1
         if self.phase3_counter % 100 == 0:
             print("3A_counter -> ", self.phase3_counter)
             time.sleep(0.1)
         msg = msg_handler.create_phase3_msg(v_val, instance_id)
         self.sender.sendto(msg, msg_handler.config['learners'])
+        self.execute_instance_status(instance_id)
 
     def handle_client_msg(self, msg, proposer_id):
         self.instance_id += 1
@@ -321,6 +407,16 @@ class Proposer(Thread):
         while True:
             msg = r.recv(2 ** 16).decode("utf_8")
             self.buffer.append(msg)
+
+    def finish_instance_id(self, instance_id):
+        self.status[instance_id] = {
+            DictIds.STATUS: self.ProposerStatus.FINISHED,
+            DictIds.TIME: datetime.datetime.now()
+        }
+
+    def handle_catch_up(self, learner_id):
+        msg = msg_handler.create_catch_up_msg_proposer(self.learned_val, learner_id)
+        self.sender.sendto(msg, msg_handler.config['learners'])
 
 
 """----------------------------------"""
@@ -374,6 +470,10 @@ def acceptor(config, id):
             _acceptor.handle_phase1a(msg_dict)
         elif msg_type == MessageType.PHASE2A:
             _acceptor.handle_phase2a(msg_dict)
+        elif msg_type == MessageType.INSTANCE_DONE:
+            instance_id = msg_dict.get(DictIds.INSTANCE_ID)
+            _acceptor.finish_instance_id(instance_id)
+
         else:
             raise Exception("Unknown Message = [" + msg + "]")
 
@@ -385,11 +485,15 @@ def proposer(config, id):
     leader = _proposer.oracle_am_i_leader()
     print('-> proposer', id)
     time.sleep(1)
+    start_time = datetime.datetime.now()
     while True:
+        current_time = datetime.datetime.now()
+        if current_time - start_time > datetime.timedelta(seconds=20):
+            _proposer.retry_waiting_instances()
+            start_time = current_time
         try:
             msg = _proposer.buffer.pop()
         except IndexError as e:
-            # _proposer.retry_waiting_instances()
             continue
         # Check msg type
         # Can either be Client Msg, P1B or P2B
@@ -409,24 +513,38 @@ def proposer(config, id):
                 proposer_id = int(msg_dict[DictIds.PROPOSER_ID])
                 if proposer_id == id:
                     _proposer.handle_phase2b(msg_dict)
+            elif msg_type == MessageType.CATCH_UP:
+                print(f"Received a catchup msg with id {msg_dict.get(DictIds.LEARNER_ID)}")
+                learner_id = msg_dict.get(DictIds.LEARNER_ID)
+                _proposer.handle_catch_up(learner_id)
+            elif msg_type == MessageType.INSTANCE_DONE:
+                instance_id = msg_dict.get(DictIds.INSTANCE_ID)
+                _proposer.finish_instance_id(instance_id)
             else:
                 # print("proposer: sending %s to acceptors" % (msg)
                 raise Exception("Unknown Message message = [" + msg + "]")
-            # _proposer.retry_waiting_instances()
         else:
             pass
 
 
 def learner(config, id):
-    _learner = Learner()
-    # _learner.start()
-    r = mcast_receiver(config['learners'])
+    s = mcast_sender()
+    _learner = Learner(id, s)
+    if catch_up:
+        _learner.send_catch_up_msg()
+        _learner.wait_for_catchup_value()
+    _learner.start()
     while True:
-        msg = r.recv(2 ** 16).decode("utf_8")
+        try:
+            msg = _learner.buffer.pop()
+        except IndexError as e:
+            continue
         msg_dict = json.loads(msg)
         msg_type = int(msg_dict[DictIds.MSG_TYPE])
         if msg_type == MessageType.PHASE3:
             _learner.handle_phase3(msg_dict)
+        elif msg_type == MessageType.CATCH_UP:
+            pass
         else:
             raise Exception("Unknown Message message = [" + str(msg_dict) + "]")
 
@@ -458,6 +576,10 @@ if __name__ == '__main__':
     elif role == 'proposer':
         rolefunc = proposer
     elif role == 'learner':
+        try:
+            catch_up = int(sys.argv[4])
+        except IndexError:
+            pass
         rolefunc = learner
     elif role == 'client':
         rolefunc = client
