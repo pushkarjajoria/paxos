@@ -42,11 +42,11 @@ echo "starting client 1..."
 
 ./client.sh 1 $conf < ../prop1 &
 
-sleep 10
+sleep 5
 echo "starting learners 2..."
-./learner.sh 2 $conf 1 > ../learn2 &
+./learner_catchup.sh 2 $conf > ../learn2 &
 
-sleep 1
+sleep 2
 echo "starting client 2..."
 ./client.sh 2 $conf < ../prop2 &
 

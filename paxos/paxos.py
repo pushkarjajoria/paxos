@@ -113,33 +113,29 @@ class MsgHandler:
         json_dump = json.dumps(json_dict).encode("utf_8")
         return json_dump
 
-    def create_catch_up_msg(self, learner_id):
+    def create_catch_up_msg(self):
         json_dict = {
-            DictIds.MSG_TYPE: MessageType.CATCH_UP,
-            DictIds.LEARNER_ID: learner_id
+            DictIds.MSG_TYPE: MessageType.CATCH_UP
         }
         json_dump = json.dumps(json_dict).encode("utf_8")
         return json_dump
 
-    def create_catch_up_msg_proposer(self, learned_val, learner_id):
+    def create_catch_up_msg_proposer(self, learned_val):
         json_dict = {
             DictIds.MSG_TYPE: MessageType.CATCH_UP,
-            DictIds.CATCHUP_VALUES: learned_val,
-            DictIds.LEARNER_ID: learner_id
+            DictIds.CATCHUP_VALUES: learned_val
         }
         json_dump = json.dumps(json_dict).encode("utf_8")
         return json_dump
 
 
-
-class Learner(Thread):
-    def __init__(self, id, sender):
+class Learner():
+    def __init__(self, sender):
         Thread.__init__(self)
         self.learned_values = {}
         self.learned_values_catchup = []
         self.buffer = []
         self.sender = sender
-        self.id = id
 
     def handle_phase3(self, msg_dict):
         instance_id = msg_dict[DictIds.INSTANCE_ID]
@@ -158,11 +154,8 @@ class Learner(Thread):
             msg_dict = json.loads(msg)
             msg_type = msg_dict.get(DictIds.MSG_TYPE)
             if msg_type == MessageType.CATCH_UP:
-                if msg_dict.get(DictIds.LEARNER_ID) == self.id:
-                    self.handle_catch_up(msg_dict)
-                    return
-                else:
-                    continue
+                self.handle_catch_up(msg_dict)
+                return
             self.buffer.append(msg)
 
     def run(self):
@@ -172,14 +165,15 @@ class Learner(Thread):
             self.buffer.append(msg)
 
     def send_catch_up_msg(self):
-        catch_up_msg = msg_handler.create_catch_up_msg(self.id)
+        catch_up_msg = msg_handler.create_catch_up_msg()
         self.sender.sendto(catch_up_msg, msg_handler.config['proposers'])
 
     def handle_catch_up(self, msg_dict):
-        values = msg_dict.get(DictIds.CATCHUP_VALUES)
-        self.learned_values_catchup = values
+        values = list(msg_dict.get(DictIds.CATCHUP_VALUES))
+        values.reverse()
         while len(values) > 0:
             print(values.pop())
+            sys.stdout.flush()
 
 
 class Acceptor(Thread):
@@ -414,8 +408,8 @@ class Proposer(Thread):
             DictIds.TIME: datetime.datetime.now()
         }
 
-    def handle_catch_up(self, learner_id):
-        msg = msg_handler.create_catch_up_msg_proposer(self.learned_val, learner_id)
+    def handle_catch_up(self):
+        msg = msg_handler.create_catch_up_msg_proposer(self.learned_val)
         self.sender.sendto(msg, msg_handler.config['learners'])
 
 
@@ -515,8 +509,7 @@ def proposer(config, id):
                     _proposer.handle_phase2b(msg_dict)
             elif msg_type == MessageType.CATCH_UP:
                 print(f"Received a catchup msg with id {msg_dict.get(DictIds.LEARNER_ID)}")
-                learner_id = msg_dict.get(DictIds.LEARNER_ID)
-                _proposer.handle_catch_up(learner_id)
+                _proposer.handle_catch_up()
             elif msg_type == MessageType.INSTANCE_DONE:
                 instance_id = msg_dict.get(DictIds.INSTANCE_ID)
                 _proposer.finish_instance_id(instance_id)
@@ -529,16 +522,13 @@ def proposer(config, id):
 
 def learner(config, id):
     s = mcast_sender()
-    _learner = Learner(id, s)
+    _learner = Learner(s)
     if catch_up:
         _learner.send_catch_up_msg()
         _learner.wait_for_catchup_value()
-    _learner.start()
+    r = mcast_receiver(config['learners'])
     while True:
-        try:
-            msg = _learner.buffer.pop()
-        except IndexError as e:
-            continue
+        msg = r.recv(2 ** 16).decode("utf_8")
         msg_dict = json.loads(msg)
         msg_type = int(msg_dict[DictIds.MSG_TYPE])
         if msg_type == MessageType.PHASE3:
@@ -555,13 +545,13 @@ def client(config, id):
     values = sys.stdin
     for i, value in enumerate(values):
         value = value.strip()
-        print("client: sending %s to proposers" % value)
+        # print("client: sending %s to proposers" % value)
         json_msg = msg_handler.create_proposer_msg(value)
         s.sendto(json_msg, config['proposers'])
         if i % 2000 == 0 and i > 0:
             time.sleep(0.25)
 
-    print('client done.')
+    print(f"client{id} done.")
 
 
 if __name__ == '__main__':
@@ -578,7 +568,7 @@ if __name__ == '__main__':
     elif role == 'learner':
         try:
             catch_up = int(sys.argv[4])
-        except IndexError:
+        except IndexError as e:
             pass
         rolefunc = learner
     elif role == 'client':
