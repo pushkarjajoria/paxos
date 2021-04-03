@@ -71,5 +71,5 @@ hand to remove the filter.
 - fake-paxos is a broken implementation that has the "interface" your
 project should follow (bash scripts). You can try and run it using:
 
-    `./run.sh fake-paxos 100
-    ./check_all.sh`
+    `./run.sh fake-paxos 100`
+    `./check_all.sh`
