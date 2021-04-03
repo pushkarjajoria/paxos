@@ -2,7 +2,7 @@ These are some basic tests that can be used to check the correctness
 and functionalities of your Paxos implementation. They are not
 comprehensive but should give you enough confidence that your implementation works.
 
-= Dependencies =
+## Dependencies
 You need bash and basic unix tools (grep, sed, etc).
 If you want to run the test with msg losses, you need iptables with sudo access.
 
@@ -10,11 +10,11 @@ Depending on the network interface used, ip multicast might not be
 enabled. You can check using "ifconfig" and checking that the
 "MULTICAST" flag is set. You *might* have to enable it using:
 
-    ifconfig IFACE multicast       # IFACE is the name of the interface
+    `ifconfig IFACE multicast       # IFACE is the name of the interface`
 
 Using a connected cable/wifi interface will probably not have this problem (e.g. "eth0", "wlan0").
 
-= How to run the tests: =
+## How to run the tests
 
 1) Place the root of your paxos implementation inside this
 directory. For example, if you have the folder:
@@ -38,7 +38,7 @@ example:
 "Test 3" might FAIL in some cases, but with few proposed values and no message
 loss it should also be OK.
 
-= Caveats/Tips =
+## Caveats/Tips
 
 a) If you are using a "hardcoded" named network interface
 (e.g. "eth0"), you must make it hardcoded inside your bash scripts
@@ -71,5 +71,5 @@ hand to remove the filter.
 g) fake-paxos is a broken implementation that has the "interface" your
 project should follow (bash scripts). You can try and run it using:
 
-    ./run.sh fake-paxos 100
-    ./check_all.sh
+    `./run.sh fake-paxos 100`
+    `./check_all.sh`
