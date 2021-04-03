@@ -67,9 +67,3 @@ change inside the script. It does it by adding a rule/filter with
 iptables.  It will also remove it using "loss_unset.sh". If kill the
 script for some reason, you might have to call "loss_unset.sh" by
 hand to remove the filter.
-
-- fake-paxos is a broken implementation that has the "interface" your
-project should follow (bash scripts). You can try and run it using:
-
-    `./run.sh fake-paxos 100`
-    `./check_all.sh`
